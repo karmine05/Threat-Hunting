@@ -23,10 +23,14 @@ Over the next couple of weeks I will be releasing more data sets to enable hunti
 
 # Requirements :
 
-A. Apache Spark
+A. Apache Spark.
 
 B. JupyterNoteBook. 
 
+C. untar the `edr_all_raw.parquet.tar` 
+```
+tar -xvf edr_all_raw.parquet.tar
+```
 
 # Purpose :
 
@@ -34,8 +38,18 @@ When I started the journey to Leverage Apache Spark and Python to crunch through
 
 # Future Works :
 
-A. [+] more codes
+A. [+] more codes.
 
-B. [+] cover more event_ids from Sysmon & windows security events 
+B. [+] cover more event_ids from Sysmon & windows security events.
 
-C. [+] Let Create a SIGMA to SQL converter
+C. [+] Lets Create a SIGMA to SQL converter.
+
+
+# Issues :
+
+[-] The current dataset provided doesn't have 2 fields that are part of the codebase - Description, IntegrityLevel.
+    [These won't impact the actual codes and if you use your own datasets The NoteBook will run with out nay issues. The missing fields are only being used in few usecase, so you should be able to run 90% of the code with out any issues. ] 
+
+```
+[N.B => These fields will be available with the new datasets. ]
+```
