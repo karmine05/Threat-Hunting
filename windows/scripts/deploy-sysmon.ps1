@@ -87,8 +87,9 @@ function Get-IsAdmin {
 function Invoke-LoggedProcess {
     param([string]$FilePath, [string[]]$ArgumentList)
     Write-Log "INFO" "  command: $FilePath $($ArgumentList -join ' ')"
-    $stdout = Join-Path $WorkRoot "sysmon-cmd.out.log"
-    $stderr = Join-Path $WorkRoot "sysmon-cmd.err.log"
+    $stamp = Get-Date -Format "yyyyMMddHHmmssfff"
+    $stdout = Join-Path $WorkRoot "sysmon-cmd-$stamp.out.log"
+    $stderr = Join-Path $WorkRoot "sysmon-cmd-$stamp.err.log"
     try {
         $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList `
             -Wait -PassThru -NoNewWindow `
@@ -277,7 +278,11 @@ function Resolve-PayloadDir {
     $candidates += $WorkRoot
     $candidates += (Join-Path $WorkRoot "bin")
     foreach ($d in $candidates) {
-        if ($d -and (Find-SysmonBinary -Dir $d)) { return $d }
+        if (-not $d) { continue }
+        $bin = Find-SysmonBinary -Dir $d
+        if (-not $bin) { continue }
+        if (Test-MicrosoftSigned -Path $bin) { return $d }
+        Write-Log "WARN" "Ignoring unsigned Sysmon binary at $bin"
     }
     return $null
 }
@@ -339,16 +344,23 @@ function Resolve-ConfigFile {
         Write-Log "WARN" "Explicit -ConfigPath was not a valid Sysmon XML: $ConfigPath"
     }
 
-    # Source of truth: public GitHub config.
+    # Source of truth: public GitHub config (CDN can lag; try cache-bust then jsDelivr).
     if (-not $SkipDownload) {
         $tmp = Join-Path $WorkRoot "sysmonconfig.download.xml"
-        if (Get-WebFile -Url $ConfigUrl -OutFile $tmp) {
-            $tried += $ConfigUrl
-            if (Copy-IfValid $tmp) {
-                Write-Log "SUCCESS" "Fetched config from GitHub: $ConfigUrl"
-                return $dest
+        $urls = @(
+            $ConfigUrl,
+            ($ConfigUrl + "?t=" + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),
+            "https://cdn.jsdelivr.net/gh/karmine05/Threat-Hunting@main/windows/sysmon/sysmonconfig.xml"
+        )
+        foreach ($u in $urls) {
+            if (Get-WebFile -Url $u -OutFile $tmp) {
+                $tried += $u
+                if (Copy-IfValid $tmp) {
+                    Write-Log "SUCCESS" "Fetched config from GitHub: $u"
+                    return $dest
+                }
+                Write-Log "WARN" "Downloaded config failed XML validation: $u"
             }
-            Write-Log "WARN" "Downloaded config failed XML validation."
         }
     }
 
@@ -487,6 +499,15 @@ Write-Log "INFO" "Log: $LogFile"
 if (-not (Get-IsAdmin)) {
     Fail "Administrator rights are required to install/configure the Sysmon driver. Make sure Fleet is running this script elevated."
 }
+
+try {
+    $self = $null
+    if ($PSCommandPath) { $self = $PSCommandPath }
+    elseif ($MyInvocation.MyCommand.Path) { $self = $MyInvocation.MyCommand.Path }
+    if ($self -and (Test-Path -LiteralPath $self)) {
+        Copy-Item -LiteralPath $self -Destination (Join-Path $WorkRoot "deploy-sysmon.ps1") -Force
+    }
+} catch { }
 
 $payloadDir = Install-SysmonPayload
 $ConfigPath = Resolve-ConfigFile -PayloadDir $payloadDir

@@ -20,4 +20,4 @@ Upload `deploy-sysmon.ps1` in Fleet (**Controls → Scripts**). The script:
 
 - Script: [`scripts/windows-patch.ps1`](./scripts/windows-patch.ps1)
 
-Upload in Fleet. It notifies the logged-on user, installs the latest Microsoft updates from official Windows Update / Microsoft Update, upgrades third-party packages with Chocolatey and winget, then force-restarts with a host notification if a reboot is required.
+Upload in Fleet. It notifies the logged-on user, then (when run as SYSTEM by Fleet) hands off to a one-shot scheduled task so the work survives Fleet's default 5-minute `script_execution_timeout`. Raise that timeout to 3600+ in agent options if you want the script to stay attached. The task installs the latest Microsoft updates from official Windows Update / Microsoft Update, upgrades third-party packages with Chocolatey and winget, then force-restarts with a host notification if a reboot is required.

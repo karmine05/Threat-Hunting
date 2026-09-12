@@ -14,6 +14,10 @@
 #  -----
 #  Controls -> Scripts -> upload this .ps1, scope to Windows.
 #  fleetd must be packaged with --enable-scripts. Runs elevated as SYSTEM.
+#  Fleet's default script_execution_timeout is 300s (max 18000). Windows
+#  Update cannot finish in 5 minutes, so when this script is launched as
+#  SYSTEM (Fleet) it notifies the user, then hands off to a one-shot
+#  scheduled task and returns 0 so Fleet does not kill the install.
 #
 #  Flags:
 #      -NoRestart            report reboot needed, do not force it
@@ -21,6 +25,7 @@
 #      -SkipWindowsUpdate    skip the Microsoft update pass
 #      -SkipThirdParty       skip chocolatey / winget
 #      -NoNotify             log-only (no pop-up)
+#      -InTask               internal: already running as the scheduled task
 # ==============================================================================
 
 [CmdletBinding()]
@@ -30,6 +35,7 @@ param(
     [switch]$SkipWindowsUpdate,
     [switch]$SkipThirdParty,
     [switch]$NoNotify,
+    [switch]$InTask,
     [string]$LogFile = ""
 )
 
@@ -113,7 +119,7 @@ function Send-UserNotification {
     try {
         $msg = Get-Command msg.exe -ErrorAction Stop
         # msg.exe delivers a host pop-up even when this script runs as SYSTEM.
-        & $msg.Source * /TIME:$TimeoutSec $flat 2>&1 | Out-Null
+        & $msg.Source * /TIME:$TimeoutSec "$flat" 2>&1 | Out-Null
     } catch {
         Write-Log "WARN" "Failed to deliver pop-up notification: $($_.Exception.Message)"
     }
@@ -190,9 +196,11 @@ function Install-WindowsUpdates {
     }
 
     Get-WsusHint
-    Send-UserNotification -Title "Windows Update" `
-        -Message "Starting to install the latest Microsoft updates quietly. This may take several minutes. Please save your work." `
-        -TimeoutSec 45 -EventId 1001
+    if (-not $InTask) {
+        Send-UserNotification -Title "Windows Update" `
+            -Message "Starting to install the latest Microsoft updates quietly. This may take several minutes. Please save your work." `
+            -TimeoutSec 45 -EventId 1001
+    }
 
     $muOk = Register-MicrosoftUpdateService
 
@@ -236,7 +244,18 @@ function Install-WindowsUpdates {
             try { if ($u.KBArticleIDs -and $u.KBArticleIDs.Count -gt 0) { $kb = "KB$($u.KBArticleIDs.Item(0))" } } catch { }
             Write-Log "INFO" "  - $($u.Title) $kb"
             try { if (-not $u.EulaAccepted) { $u.AcceptEula() } } catch { }
+            $needsInput = $false
+            try { if ($u.InstallationBehavior -and $u.InstallationBehavior.CanRequestUserInput) { $needsInput = $true } } catch { }
+            if ($needsInput) {
+                Write-Log "WARN" "Skipping update that may prompt the user: $($u.Title)"
+                continue
+            }
             [void]$coll.Add($u)
+        }
+        if ($coll.Count -eq 0) {
+            Write-Log "INFO" "No quiet-installable updates remained after filtering."
+            if (Test-RebootRequired) { $script:REBOOT_REQUIRED = $true }
+            return
         }
 
         Write-Log "INFO" "Downloading updates from Microsoft..."
@@ -280,14 +299,14 @@ function Install-WindowsUpdates {
     }
     catch {
         Write-Log "WARN" "Windows Update COM API failed: $($_.Exception.Message)"
-        Write-Log "INFO" "Falling back to USOClient ScanInstallWait..."
+        Write-Log "INFO" "Falling back to USOClient ScanInstallWait (blocks until scan/download/install finish)..."
         try {
-            Start-Process "USOClient.exe" -ArgumentList "StartScan" -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue | Out-Null
-            Start-Process "USOClient.exe" -ArgumentList "StartDownload" -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue | Out-Null
-            Start-Process "USOClient.exe" -ArgumentList "StartInstall" -Wait -PassThru -NoNewWindow -ErrorAction SilentlyContinue | Out-Null
+            $uso = Get-Command USOClient.exe -ErrorAction Stop
+            Start-Process -FilePath $uso.Source -ArgumentList "ScanInstallWait" -Wait -NoNewWindow -ErrorAction Stop | Out-Null
             Start-Sleep -Seconds 5
-            Write-Log "INFO" "USOClient fallback issued StartScan/StartDownload/StartInstall."
+            Write-Log "INFO" "USOClient ScanInstallWait completed."
         } catch {
+            Write-Log "WARN" "USOClient ScanInstallWait failed: $($_.Exception.Message)"
             $script:FAILURES += "Windows Update (USOClient fallback failed)"
         }
     }
@@ -447,7 +466,7 @@ function Invoke-RebootHandling {
     Write-Log "WARN" "Forced restart in ${RestartTimeout}s (shutdown /r /f /t:$RestartTimeout)."
     try {
         $shutdown = Get-Command shutdown.exe -ErrorAction Stop
-        & $shutdown.Source /r /f /t:$RestartTimeout /c "Jcode auto-patch: reboot required to finish Microsoft updates."
+        & $shutdown.Source /r /f /t $RestartTimeout /c "Jcode auto-patch: reboot required to finish Microsoft updates."
         Write-Log "WARN" "Reboot scheduled."
     } catch {
         Write-Log "ERROR" "Failed to trigger reboot: $($_.Exception.Message)"
@@ -498,6 +517,61 @@ Write-Log "INFO" "Started. Host=$env:COMPUTERNAME Admin=$isAdmin SystemAccount=$
 Write-Log "INFO" "Log file: $LogFile"
 if (-not $isAdmin) {
     Write-Log "WARN" "Not running elevated: Windows Update and forced reboot will be skipped."
+}
+
+function Get-SelfScriptPath {
+    if ($PSCommandPath) { return $PSCommandPath }
+    if ($MyInvocation.MyCommand.Path) { return $MyInvocation.MyCommand.Path }
+    return $null
+}
+
+function Start-DetachedPatchJob {
+    $persistDir = "$env:ProgramData\jcode"
+    if (-not (Test-Path $persistDir)) { New-Item -ItemType Directory -Path $persistDir -Force | Out-Null }
+    $persistScript = Join-Path $persistDir "windows-patch.ps1"
+    $src = Get-SelfScriptPath
+    if (-not $src -or -not (Test-Path -LiteralPath $src)) {
+        Write-Log "WARN" "Cannot locate this script on disk; running inline (Fleet 5-minute timeout may kill a long update)."
+        return $false
+    }
+    Copy-Item -LiteralPath $src -Destination $persistScript -Force
+
+    $argParts = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "`"$persistScript`"",
+        "-InTask",
+        "-RestartTimeout", "$RestartTimeout"
+    )
+    if ($NoRestart)         { $argParts += "-NoRestart" }
+    if ($SkipWindowsUpdate) { $argParts += "-SkipWindowsUpdate" }
+    if ($SkipThirdParty)    { $argParts += "-SkipThirdParty" }
+    if ($NoNotify)          { $argParts += "-NoNotify" }
+    if ($LogFile)           { $argParts += @("-LogFile", "`"$LogFile`"") }
+
+    $taskName = "JcodeWindowsPatch"
+    try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+
+    $action    = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ($argParts -join " ")
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $trigger   = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(12))
+    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+                    -ExecutionTimeLimit (New-TimeSpan -Hours 4)
+    Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Trigger $trigger `
+        -Settings $settings -Force | Out-Null
+    Write-Log "SUCCESS" "Scheduled SYSTEM task '$taskName' to start in ~12s (survives Fleet's default 5-minute script timeout)."
+    Write-Log "INFO" "Follow progress in $LogFile"
+    return $true
+}
+
+# Fleet (SYSTEM) hand-off: notify the user now, then return so fleetd does not kill the install.
+if (-not $InTask -and $isSystemAccount -and $isAdmin) {
+    if (-not $SkipWindowsUpdate) {
+        Send-UserNotification -Title "Windows Update" `
+            -Message "Starting to install the latest Microsoft updates quietly. This may take several minutes. Please save your work." `
+            -TimeoutSec 45 -EventId 1001
+    }
+    if (Start-DetachedPatchJob) { exit 0 }
+    Write-Log "WARN" "Scheduled-task hand-off failed; continuing inline."
 }
 
 if (-not $SkipWindowsUpdate) { Install-WindowsUpdates; Write-Host "" }
