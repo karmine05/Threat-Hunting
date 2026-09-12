@@ -305,12 +305,28 @@ function Install-SysmonPayload {
     Write-Log "INFO" "Downloaded Sysmon.zip ($((Get-Item $zip).Length) bytes). SHA256=$(Get-FileSha256Lower $zip)"
     if (Test-Path $extract) { Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Path $extract -Force | Out-Null
+    $extracted = $false
     try {
         Expand-Archive -Path $zip -DestinationPath $extract -Force
+        $extracted = $true
     } catch {
-        Fail "Failed to extract Sysmon.zip: $($_.Exception.Message)"
+        Write-Log "WARN" "Expand-Archive failed: $($_.Exception.Message)"
+    }
+    if (-not $extracted) {
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $extract)
+            $extracted = $true
+        } catch {
+            Fail "Failed to extract Sysmon.zip: $($_.Exception.Message)"
+        }
     }
     $bin = Find-SysmonBinary -Dir $extract
+    if (-not $bin) {
+        $nested = Get-ChildItem -Path $extract -Filter "Sysmon*.exe" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($nested) { $bin = $nested.FullName; $extract = $nested.DirectoryName }
+    }
     if (-not $bin) { Fail "Sysmon.zip extracted but no Sysmon*.exe was found in $extract" }
     if (-not (Test-MicrosoftSigned -Path $bin)) {
         Fail "Downloaded Sysmon binary is not validly signed by Microsoft. Aborting."
@@ -349,7 +365,7 @@ function Resolve-ConfigFile {
         $tmp = Join-Path $WorkRoot "sysmonconfig.download.xml"
         $urls = @(
             $ConfigUrl,
-            ($ConfigUrl + "?t=" + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),
+            ($ConfigUrl + "?t=" + [int]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01Z').TotalSeconds),
             "https://cdn.jsdelivr.net/gh/karmine05/Threat-Hunting@main/windows/sysmon/sysmonconfig.xml"
         )
         foreach ($u in $urls) {

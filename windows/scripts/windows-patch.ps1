@@ -553,12 +553,15 @@ function Start-DetachedPatchJob {
 
     $action    = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ($argParts -join " ")
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-    $trigger   = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(12))
+    $trigger   = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(15))
     $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
                     -ExecutionTimeLimit (New-TimeSpan -Hours 4)
     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Trigger $trigger `
         -Settings $settings -Force | Out-Null
-    Write-Log "SUCCESS" "Scheduled SYSTEM task '$taskName' to start in ~12s (survives Fleet's default 5-minute script timeout)."
+    try { Start-ScheduledTask -TaskName $taskName -ErrorAction Stop } catch {
+        Write-Log "WARN" "Start-ScheduledTask failed (trigger still set for ~15s): $($_.Exception.Message)"
+    }
+    Write-Log "SUCCESS" "Scheduled SYSTEM task '$taskName' (survives Fleet's default 5-minute script timeout)."
     Write-Log "INFO" "Follow progress in $LogFile"
     return $true
 }
