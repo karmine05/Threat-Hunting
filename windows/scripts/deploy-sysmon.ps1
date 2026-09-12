@@ -365,7 +365,7 @@ function Resolve-ConfigFile {
         $tmp = Join-Path $WorkRoot "sysmonconfig.download.xml"
         $urls = @(
             $ConfigUrl,
-            ($ConfigUrl + "?t=" + [int]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01Z').TotalSeconds),
+            ($ConfigUrl + "?t=" + [int]((Get-Date).ToUniversalTime() - [datetime]'1970-01-01').TotalSeconds),
             "https://cdn.jsdelivr.net/gh/karmine05/Threat-Hunting@main/windows/sysmon/sysmonconfig.xml"
         )
         foreach ($u in $urls) {
