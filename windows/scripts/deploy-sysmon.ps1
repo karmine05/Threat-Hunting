@@ -87,10 +87,23 @@ function Get-IsAdmin {
 function Invoke-LoggedProcess {
     param([string]$FilePath, [string[]]$ArgumentList)
     Write-Log "INFO" "  command: $FilePath $($ArgumentList -join ' ')"
-    $out = & $FilePath @ArgumentList 2>&1
-    $code = $LASTEXITCODE
-    ($out | Out-String) -split "`r?`n" | ForEach-Object {
-        if ($_ -match '\S') { Write-Log "INFO" "  sysmon> $_" }
+    $stdout = Join-Path $WorkRoot "sysmon-cmd.out.log"
+    $stderr = Join-Path $WorkRoot "sysmon-cmd.err.log"
+    try {
+        $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList `
+            -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $code = $p.ExitCode
+    } catch {
+        Write-Log "ERROR" "Failed to launch $FilePath : $($_.Exception.Message)"
+        return 1
+    }
+    foreach ($log in @($stdout, $stderr)) {
+        if (Test-Path $log) {
+            Get-Content -LiteralPath $log -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_ -match '\S') { Write-Log "INFO" "  sysmon> $_" }
+            }
+        }
     }
     return $code
 }
@@ -242,7 +255,8 @@ function Get-WebFile {
     for ($i = 1; $i -le $Attempts; $i++) {
         try {
             Write-Log "INFO" "Downloading (attempt $i/$Attempts): $Url"
-            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec 120 `
+                -Headers @{ "User-Agent" = "Fleet-Sysmon-Deploy/1.0" } -ErrorAction Stop
             if ((Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 0)) { return $true }
         } catch {
             Write-Log "WARN" "Download failed: $($_.Exception.Message)"
@@ -261,6 +275,7 @@ function Resolve-PayloadDir {
     }
     $candidates += (Get-Location).Path
     $candidates += $WorkRoot
+    $candidates += (Join-Path $WorkRoot "bin")
     foreach ($d in $candidates) {
         if ($d -and (Find-SysmonBinary -Dir $d)) { return $d }
     }
@@ -314,24 +329,17 @@ function Resolve-ConfigFile {
         return $true
     }
 
+    # Explicit -ConfigPath always wins.
     if ($ConfigPath) {
         $tried += $ConfigPath
-        if (Copy-IfValid $ConfigPath) { return $dest }
-    }
-    foreach ($c in @(
-            (Join-Path $PayloadDir "sysmonconfig.xml"),
-            $(if ($PSScriptRoot) { Join-Path $PSScriptRoot "sysmonconfig.xml" } else { $null }),
-            $(if ($PSScriptRoot) { Join-Path $PSScriptRoot "Sysmon\sysmonconfig.xml" } else { $null })
-        )) {
-        if ($c) {
-            $tried += $c
-            if (Copy-IfValid $c) {
-                Write-Log "INFO" "Using local config: $c"
-                return $dest
-            }
+        if (Copy-IfValid $ConfigPath) {
+            Write-Log "INFO" "Using explicit config: $ConfigPath"
+            return $dest
         }
+        Write-Log "WARN" "Explicit -ConfigPath was not a valid Sysmon XML: $ConfigPath"
     }
 
+    # Source of truth: public GitHub config.
     if (-not $SkipDownload) {
         $tmp = Join-Path $WorkRoot "sysmonconfig.download.xml"
         if (Get-WebFile -Url $ConfigUrl -OutFile $tmp) {
@@ -341,6 +349,20 @@ function Resolve-ConfigFile {
                 return $dest
             }
             Write-Log "WARN" "Downloaded config failed XML validation."
+        }
+    }
+
+    foreach ($c in @(
+            (Join-Path $PayloadDir "sysmonconfig.xml"),
+            $(if ($PSScriptRoot) { Join-Path $PSScriptRoot "sysmonconfig.xml" } else { $null }),
+            $(if ($PSScriptRoot) { Join-Path $PSScriptRoot "Sysmon\sysmonconfig.xml" } else { $null })
+        )) {
+        if ($c) {
+            $tried += $c
+            if (Copy-IfValid $c) {
+                Write-Log "INFO" "Using local config fallback: $c"
+                return $dest
+            }
         }
     }
 

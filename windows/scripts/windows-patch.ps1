@@ -262,7 +262,7 @@ function Install-WindowsUpdates {
         Write-Log "INFO" "Installing $($ready.Count) update(s) quietly..."
         $installer = $session.CreateUpdateInstaller()
         $installer.Updates = $ready
-        $installer.ForceQuiet = $true
+        try { $installer.ForceQuiet = $true } catch { }
         $res = $installer.Install()
 
         $script:UPDATES_APPLIED += $ready.Count
@@ -336,7 +336,7 @@ function Update-Chocolatey {
 
     try {
         $v0 = (& $choco --version 2>&1)
-        & $choco upgrade chocolatey -y --no-progress --timeout 300 2>&1 | Out-File -FilePath $LogFile -Append
+        & $choco upgrade chocolatey -y --no-progress --timeout 3600 2>&1 | Out-File -FilePath $LogFile -Append
         $v1 = (& $choco --version 2>&1)
         if ($v0 -and $v1 -and "$v0" -ne "$v1") { $script:VERSION_CHANGES["chocolatey"] = "$v0 -> $v1" }
         Write-Log "SUCCESS" "Chocolatey updated ($v1)."
@@ -346,7 +346,7 @@ function Update-Chocolatey {
 
     try {
         Write-Log "INFO" "Upgrading all Chocolatey packages..."
-        & $choco upgrade all -y --no-progress --timeout 300 2>&1 | Out-File -FilePath $LogFile -Append
+        & $choco upgrade all -y --no-progress --timeout 3600 2>&1 | Out-File -FilePath $LogFile -Append
         $code = $LASTEXITCODE
         # 0=ok, 1=reboot required (choco convention)
         if ($code -in 0, 1, $null) {
@@ -396,16 +396,16 @@ function Update-Winget {
         Write-Log "WARN" "winget source update failed: $($_.Exception.Message)"
     }
 
-    $args = @(
+    $wingetArgs = @(
         "upgrade", "--all",
         "--accept-package-agreements", "--accept-source-agreements",
         "--disable-interactivity", "--silent"
     )
-    if ($isSystemAccount) { $args += @("--scope", "machine") }
+    if ($isSystemAccount) { $wingetArgs += @("--scope", "machine") }
 
     try {
         Write-Log "INFO" "Upgrading all winget packages..."
-        & $winget @args 2>&1 | Out-File -FilePath $LogFile -Append
+        & $winget @wingetArgs 2>&1 | Out-File -FilePath $LogFile -Append
         $code = $LASTEXITCODE
         # 0=ok, -1978335189 / 0x8A15002B = no applicable update
         if ($code -in 0, -1978335189, $null) {
